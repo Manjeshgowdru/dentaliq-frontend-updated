@@ -20,14 +20,16 @@ const action = prob =>
                  "✅ Monitor Only";
 
 export default function Appointments() {
+  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [patientList, setPatientList] = useState(INITIAL_PATIENTS);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [fetchingSchedule, setFetchingSchedule] = useState(false);
   const [conflictData, setConflictData] = useState(null);
   const [statusMessage, setStatusMessage] = useState(null);
 
   const [formData, setFormData] = useState({
-    date: new Date().toISOString().split("T")[0],
+    date: selectedDate,
     time: "10:00",
     patient_name: "",
     patient_phone: "",
@@ -36,25 +38,36 @@ export default function Appointments() {
     fee: 150,
   });
 
-  // Load live Google Calendar events on initial page render
+  // Re-fetch calendar events whenever selectedDate changes
   useEffect(() => {
     const fetchLiveSchedule = async () => {
+      setFetchingSchedule(true);
       try {
-        const today = new Date().toISOString().split("T")[0];
-        const res = await fetch(`${API_BASE_URL}/api/calendar/events?date=${today}`);
-        if (!res.ok) return;
+        const res = await fetch(`${API_BASE_URL}/api/calendar/events?date=${selectedDate}`);
+        if (!res.ok) {
+          setFetchingSchedule(false);
+          return;
+        }
 
         const data = await res.json();
-        if (data.events && data.events.length > 0) {
+        if (data.events) {
           setPatientList(data.events);
         }
       } catch (err) {
-        console.warn("Could not fetch live calendar schedule; keeping default state.", err);
+        console.warn("Could not fetch live calendar schedule; keeping fallback state.", err);
+      } finally {
+        setFetchingSchedule(false);
       }
     };
 
     fetchLiveSchedule();
-  }, []);
+  }, [selectedDate]);
+
+  const handleDateChange = (e) => {
+    const newDate = e.target.value;
+    setSelectedDate(newDate);
+    setFormData(prev => ({ ...prev, date: newDate }));
+  };
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -73,36 +86,91 @@ export default function Appointments() {
     );
 
     if (patient.prob >= 0.38) {
-      // WhatsApp trigger (High & Critical Risk)
       if (!cleanDigits) {
         alert(`No valid phone number found for ${name}`);
         return;
       }
       window.open(`https://wa.me/${cleanDigits}?text=${msg}`, "_blank");
     } else if (patient.prob >= 0.22) {
-      // SMS trigger (Moderate Risk)
       if (!rawPhone) {
         alert(`No valid phone number found for ${name}`);
         return;
       }
       window.location.href = `sms:${rawPhone}?body=${msg}`;
     } else {
-      // Low Risk
       alert(`Patient ${name} is categorized as Low Risk. No immediate action required.`);
+    }
+  };
+
+  const handleCancelAppointment = async (patient) => {
+    if (!patient.id) {
+      // Fallback for static mock items without a calendar ID
+      setPatientList(prev => prev.filter(p => p !== patient));
+      return;
+    }
+
+    const confirmed = window.confirm(`Cancel appointment for ${patient.name} at ${patient.time}? This will delete it from Google Calendar.`);
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/calendar/events/${patient.id}`, {
+        method: "DELETE",
+      });
+
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
+
+      // Remove immediately from the UI view
+      setPatientList(prev => prev.filter(p => p.id !== patient.id));
+    } catch (err) {
+      console.error("Deletion error:", err);
+      alert("Failed to delete appointment from Google Calendar. Check console for details.");
     }
   };
 
   const handleBookAppointment = async (e) => {
     e.preventDefault();
-    setLoading(true);
     setConflictData(null);
     setStatusMessage(null);
+
+    // 1. Working hours validation (08:00 - 16:30 for 30-min slot)
+    const [hours, minutes] = formData.time.split(":").map(Number);
+    if (hours < 8 || hours >= 17 || (hours === 16 && minutes > 30)) {
+      setStatusMessage({
+        type: "error",
+        text: "Appointments can only be scheduled during clinic working hours (08:00 – 17:00)."
+      });
+      return;
+    }
+
+    // 2. Patient name validation
+    if (formData.patient_name.trim().length < 2) {
+      setStatusMessage({
+        type: "error",
+        text: "Please enter a valid patient name."
+      });
+      return;
+    }
+
+    // 3. International phone format validation (+421...)
+    const phoneClean = formData.patient_phone.trim().replace(/\s+/g, "");
+    const phoneRegex = /^\+[0-9]{9,15}$/;
+    if (!phoneRegex.test(phoneClean)) {
+      setStatusMessage({
+        type: "error",
+        text: "Please enter a valid international phone number starting with '+' (e.g. +421905123456)."
+      });
+      return;
+    }
+
+    setLoading(true);
 
     const payload = {
       date: formData.date,
       time: formData.time,
       patient_name: formData.patient_name.trim(),
-      patient_phone: formData.patient_phone.trim(),
+      patient_phone: phoneClean,
       treatment_type: formData.treatment_type,
     };
 
@@ -122,18 +190,21 @@ export default function Appointments() {
       if (result.status === "booked") {
         setStatusMessage({ type: "success", text: result.message || "Appointment booked successfully!" });
         
-        const newPatientEntry = {
-          time: formData.time,
-          name: formData.patient_name,
-          proc: formData.treatment_type,
-          prob: 0.15,
-          status: "Upcoming",
-          provider: formData.provider,
-          fee: Number(formData.fee) || 150,
-          phone: formData.patient_phone.trim(),
-        };
-
-        setPatientList(prev => [newPatientEntry, ...prev]);
+        // Append dynamically if looking at current target date
+        if (formData.date === selectedDate) {
+          const newPatientEntry = {
+            id: result.event_id,
+            time: formData.time,
+            name: formData.patient_name,
+            proc: formData.treatment_type,
+            prob: 0.15,
+            status: "Upcoming",
+            provider: formData.provider,
+            fee: Number(formData.fee) || 150,
+            phone: phoneClean,
+          };
+          setPatientList(prev => [newPatientEntry, ...prev]);
+        }
 
         setTimeout(() => {
           setIsModalOpen(false);
@@ -168,26 +239,50 @@ export default function Appointments() {
   return (
     <div style={{ padding: 24, position: "relative" }}>
 
-      {/* Header */}
+      {/* Header with Date Navigator */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
-          <div style={{ fontSize: 20, fontWeight: 700, color: "#0F172A" }}>Today's Appointments</div>
-          <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>AI risk scores & Google Calendar Engine</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: "#0F172A" }}>Clinic Appointments</div>
+          <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
+            Showing schedule for <strong>{selectedDate}</strong> {fetchingSchedule && "· Syncing..."}
+          </div>
         </div>
-        <button
-          onClick={() => { setIsModalOpen(true); setStatusMessage(null); setConflictData(null); }}
-          style={{ background: "#4F5BD5", color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-        >
-          + Add Appointment
-        </button>
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={handleDateChange}
+            style={{
+              padding: "7px 12px",
+              borderRadius: 8,
+              border: "1px solid #CBD5E1",
+              fontSize: 13,
+              color: "#334155",
+              background: "#fff",
+              outline: "none",
+              cursor: "pointer"
+            }}
+          />
+          <button
+            onClick={() => { 
+              setFormData(prev => ({ ...prev, date: selectedDate }));
+              setIsModalOpen(true); 
+              setStatusMessage(null); 
+              setConflictData(null); 
+            }}
+            style={{ background: "#4F5BD5", color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+          >
+            + Add Appointment
+          </button>
+        </div>
       </div>
 
       {/* Stats row */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 20 }}>
         {[
-          ["Total Today", patientList.length, "#4F5BD5"],
+          ["Total Booked", patientList.length, "#4F5BD5"],
           ["Critical Risk", patientList.filter(p => p.prob >= 0.55).length, "#DC2626"],
-          ["Revenue Today", `€${patientList.reduce((s, p) => s + p.fee, 0).toLocaleString()}`, "#059669"],
+          ["Expected Revenue", `€${patientList.reduce((s, p) => s + (Number(p.fee) || 0), 0).toLocaleString()}`, "#059669"],
           ["Completed", patientList.filter(p => p.status === "Completed").length, "#0891B2"],
         ].map(([label, val, col]) => (
           <div key={label} style={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 10, borderTop: `3px solid ${col}`, padding: "14px 16px" }}>
@@ -208,39 +303,67 @@ export default function Appointments() {
             </tr>
           </thead>
           <tbody>
-            {[...patientList].sort((a, b) => b.prob - a.prob).map((p, i) => (
-              <tr key={i} style={{ borderBottom: "1px solid #F1F5F9", background: i % 2 === 0 ? "#fff" : "#FAFBFF" }}>
-                <td style={{ padding: "13px 16px", fontFamily: "monospace", fontSize: 13, color: "#475569" }}>{p.time}</td>
-                <td style={{ padding: "13px 16px" }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: "#0F172A" }}>{p.name}</div>
-                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>{p.status}</div>
-                </td>
-                <td style={{ padding: "13px 16px", fontSize: 13, color: "#475569" }}>{p.proc}</td>
-                <td style={{ padding: "13px 16px", fontSize: 13, color: "#475569" }}>{p.provider}</td>
-                <td style={{ padding: "13px 16px", fontSize: 13, fontWeight: 600, color: "#059669", fontFamily: "monospace" }}>€{p.fee}</td>
-                <td style={{ padding: "13px 16px" }}><RiskBadge prob={p.prob} /></td>
-                <td style={{ padding: "13px 16px" }}>
-                  <button
-                    type="button"
-                    onClick={() => handleActionClick(p)}
-                    style={{
-                      background: p.prob >= 0.55 ? "#FEF2F2" : p.prob >= 0.38 ? "#ECFDF5" : "#F8FAFC",
-                      color: p.prob >= 0.55 ? "#DC2626" : p.prob >= 0.38 ? "#059669" : "#0891B2",
-                      border: `1px solid ${p.prob >= 0.55 ? "#FECACA" : p.prob >= 0.38 ? "#A7F3D0" : "#E2E8F0"}`,
-                      borderRadius: 6,
-                      padding: "6px 10px",
-                      fontSize: 11,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      textAlign: "left",
-                      whiteSpace: "nowrap"
-                    }}
-                  >
-                    {action(p.prob)}
-                  </button>
+            {patientList.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={{ padding: "32px 16px", textAlign: "center", color: "#94A3B8", fontSize: 13 }}>
+                  No appointments scheduled for {selectedDate}.
                 </td>
               </tr>
-            ))}
+            ) : (
+              [...patientList].sort((a, b) => (a.time > b.time ? 1 : -1)).map((p, i) => (
+                <tr key={p.id || i} style={{ borderBottom: "1px solid #F1F5F9", background: i % 2 === 0 ? "#fff" : "#FAFBFF" }}>
+                  <td style={{ padding: "13px 16px", fontFamily: "monospace", fontSize: 13, color: "#475569" }}>{p.time}</td>
+                  <td style={{ padding: "13px 16px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#0F172A" }}>{p.name}</div>
+                    <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>{p.status}</div>
+                  </td>
+                  <td style={{ padding: "13px 16px", fontSize: 13, color: "#475569" }}>{p.proc}</td>
+                  <td style={{ padding: "13px 16px", fontSize: 13, color: "#475569" }}>{p.provider}</td>
+                  <td style={{ padding: "13px 16px", fontSize: 13, fontWeight: 600, color: "#059669", fontFamily: "monospace" }}>€{p.fee}</td>
+                  <td style={{ padding: "13px 16px" }}><RiskBadge prob={p.prob} /></td>
+                  <td style={{ padding: "13px 16px" }}>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <button
+                        type="button"
+                        onClick={() => handleActionClick(p)}
+                        style={{
+                          background: p.prob >= 0.55 ? "#FEF2F2" : p.prob >= 0.38 ? "#ECFDF5" : "#F8FAFC",
+                          color: p.prob >= 0.55 ? "#DC2626" : p.prob >= 0.38 ? "#059669" : "#0891B2",
+                          border: `1px solid ${p.prob >= 0.55 ? "#FECACA" : p.prob >= 0.38 ? "#A7F3D0" : "#E2E8F0"}`,
+                          borderRadius: 6,
+                          padding: "6px 10px",
+                          fontSize: 11,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          textAlign: "left",
+                          whiteSpace: "nowrap"
+                        }}
+                      >
+                        {action(p.prob)}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleCancelAppointment(p)}
+                        title="Cancel Appointment"
+                        style={{
+                          background: "transparent",
+                          border: "1px solid #CBD5E1",
+                          borderRadius: 6,
+                          padding: "6px 9px",
+                          marginLeft: 8,
+                          cursor: "pointer",
+                          color: "#94A3B8",
+                          fontSize: 12,
+                          lineHeight: 1
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
@@ -278,7 +401,6 @@ export default function Appointments() {
               </div>
             )}
 
-            {/* Alternatives Picker */}
             {conflictData && conflictData.suggested_alternatives && conflictData.suggested_alternatives.length > 0 && (
               <div style={{ background: "#F8FAFC", border: "1px dashed #CBD5E1", borderRadius: 8, padding: 12, marginBottom: 16 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 8 }}>Available Open Slots:</div>
@@ -315,10 +437,13 @@ export default function Appointments() {
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
                 <div>
-                  <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#64748B", textTransform: "uppercase", marginBottom: 4 }}>Time</label>
+                  <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#64748B", textTransform: "uppercase", marginBottom: 4 }}>Time (08:00 - 16:30)</label>
                   <input
                     type="time"
                     name="time"
+                    min="08:00"
+                    max="16:30"
+                    step="1800"
                     value={formData.time}
                     onChange={handleInputChange}
                     required
@@ -352,7 +477,7 @@ export default function Appointments() {
               </div>
 
               <div style={{ marginBottom: 12 }}>
-                <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#64748B", textTransform: "uppercase", marginBottom: 4 }}>Phone Number</label>
+                <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#64748B", textTransform: "uppercase", marginBottom: 4 }}>Phone (+Country Code)</label>
                 <input
                   type="tel"
                   name="patient_phone"
