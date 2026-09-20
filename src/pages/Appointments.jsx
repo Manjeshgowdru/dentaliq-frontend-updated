@@ -1,14 +1,16 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import RiskBadge from "../components/RiskBadge";
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+
 const INITIAL_PATIENTS = [
-  { time: "09:00", name: "Eva Šimková",    proc: "Scaling & Polishing", prob: 0.12, status: "Completed", provider: "Dr. Patel",    fee: 95  },
-  { time: "10:30", name: "Peter Kováč",    proc: "Cleaning",            prob: 0.82, status: "Upcoming",  provider: "Dr. Chen",     fee: 175 },
-  { time: "11:30", name: "Anna Balážová",  proc: "Filling",             prob: 0.58, status: "Upcoming",  provider: "Dr. Williams", fee: 220 },
-  { time: "13:00", name: "Tomáš Mikuš",    proc: "Root Canal",          prob: 0.22, status: "Upcoming",  provider: "Dr. Santos",   fee: 310 },
-  { time: "14:00", name: "Lucia Nováková", proc: "Implant Consult",     prob: 0.65, status: "Upcoming",  provider: "Dr. Kim",      fee: 480 },
-  { time: "15:00", name: "Jana Tothová",   proc: "Crown Prep",          prob: 0.18, status: "Upcoming",  provider: "Dr. Patel",    fee: 390 },
-  { time: "16:00", name: "Martin Horváth", proc: "Extraction",          prob: 0.44, status: "Upcoming",  provider: "Dr. Chen",     fee: 150 },
+  { time: "09:00", name: "Eva Šimková",    proc: "Scaling & Polishing", prob: 0.12, status: "Completed", provider: "Dr. Patel",    fee: 95,  phone: "+421905111222" },
+  { time: "10:30", name: "Peter Kováč",    proc: "Cleaning",            prob: 0.82, status: "Upcoming",  provider: "Dr. Chen",     fee: 175, phone: "+421905333444" },
+  { time: "11:30", name: "Anna Balážová",  proc: "Filling",             prob: 0.58, status: "Upcoming",  provider: "Dr. Williams", fee: 220, phone: "+421905555666" },
+  { time: "13:00", name: "Tomáš Mikuš",    proc: "Root Canal",          prob: 0.22, status: "Upcoming",  provider: "Dr. Santos",   fee: 310, phone: "+421905777888" },
+  { time: "14:00", name: "Lucia Nováková", proc: "Implant Consult",     prob: 0.65, status: "Upcoming",  provider: "Dr. Kim",      fee: 480, phone: "+421905999000" },
+  { time: "15:00", name: "Jana Tothová",   proc: "Crown Prep",          prob: 0.18, status: "Upcoming",  provider: "Dr. Patel",    fee: 390, phone: "+421908123456" },
+  { time: "16:00", name: "Martin Horváth", proc: "Extraction",          prob: 0.44, status: "Upcoming",  provider: "Dr. Chen",     fee: 150, phone: "+421908654321" },
 ];
 
 const action = prob =>
@@ -34,9 +36,60 @@ export default function Appointments() {
     fee: 150,
   });
 
+  // Load live Google Calendar events on initial page render
+  useEffect(() => {
+    const fetchLiveSchedule = async () => {
+      try {
+        const today = new Date().toISOString().split("T")[0];
+        const res = await fetch(`${API_BASE_URL}/api/calendar/events?date=${today}`);
+        if (!res.ok) return;
+
+        const data = await res.json();
+        if (data.events && data.events.length > 0) {
+          setPatientList(data.events);
+        }
+      } catch (err) {
+        console.warn("Could not fetch live calendar schedule; keeping default state.", err);
+      }
+    };
+
+    fetchLiveSchedule();
+  }, []);
+
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  const handleActionClick = (patient) => {
+    const rawPhone = patient.phone || "";
+    const cleanDigits = rawPhone.replace(/[^0-9]/g, "");
+    const name = patient.name;
+    const time = patient.time;
+    const clinicName = "Gowdris Labs Dental Clinic";
+
+    const msg = encodeURIComponent(
+      `Dobrý deň ${name}, pripomíname Vám termín vyšetrenia v ${clinicName} o ${time}. V prípade zmeny termínu nás prosím bezodkladne kontaktujte.`
+    );
+
+    if (patient.prob >= 0.38) {
+      // WhatsApp trigger (High & Critical Risk)
+      if (!cleanDigits) {
+        alert(`No valid phone number found for ${name}`);
+        return;
+      }
+      window.open(`https://wa.me/${cleanDigits}?text=${msg}`, "_blank");
+    } else if (patient.prob >= 0.22) {
+      // SMS trigger (Moderate Risk)
+      if (!rawPhone) {
+        alert(`No valid phone number found for ${name}`);
+        return;
+      }
+      window.location.href = `sms:${rawPhone}?body=${msg}`;
+    } else {
+      // Low Risk
+      alert(`Patient ${name} is categorized as Low Risk. No immediate action required.`);
+    }
   };
 
   const handleBookAppointment = async (e) => {
@@ -54,7 +107,7 @@ export default function Appointments() {
     };
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/calendar/book-or-resolve", {
+      const response = await fetch(`${API_BASE_URL}/api/calendar/book-or-resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -69,7 +122,6 @@ export default function Appointments() {
       if (result.status === "booked") {
         setStatusMessage({ type: "success", text: result.message || "Appointment booked successfully!" });
         
-        // Add new appointment directly into the active dashboard view
         const newPatientEntry = {
           time: formData.time,
           name: formData.patient_name,
@@ -78,11 +130,11 @@ export default function Appointments() {
           status: "Upcoming",
           provider: formData.provider,
           fee: Number(formData.fee) || 150,
+          phone: formData.patient_phone.trim(),
         };
 
         setPatientList(prev => [newPatientEntry, ...prev]);
 
-        // Auto close modal after brief delay
         setTimeout(() => {
           setIsModalOpen(false);
           setStatusMessage(null);
@@ -98,7 +150,10 @@ export default function Appointments() {
       }
     } catch (err) {
       console.error("Booking error:", err);
-      setStatusMessage({ type: "error", text: "Failed to connect to backend engine. Ensure Uvicorn is running." });
+      setStatusMessage({ 
+        type: "error", 
+        text: `Failed to connect to backend engine at ${API_BASE_URL}. Ensure Uvicorn is running.` 
+      });
     } finally {
       setLoading(false);
     }
@@ -164,7 +219,26 @@ export default function Appointments() {
                 <td style={{ padding: "13px 16px", fontSize: 13, color: "#475569" }}>{p.provider}</td>
                 <td style={{ padding: "13px 16px", fontSize: 13, fontWeight: 600, color: "#059669", fontFamily: "monospace" }}>€{p.fee}</td>
                 <td style={{ padding: "13px 16px" }}><RiskBadge prob={p.prob} /></td>
-                <td style={{ padding: "13px 16px", fontSize: 11, color: "#0891B2", fontWeight: 500 }}>{action(p.prob)}</td>
+                <td style={{ padding: "13px 16px" }}>
+                  <button
+                    type="button"
+                    onClick={() => handleActionClick(p)}
+                    style={{
+                      background: p.prob >= 0.55 ? "#FEF2F2" : p.prob >= 0.38 ? "#ECFDF5" : "#F8FAFC",
+                      color: p.prob >= 0.55 ? "#DC2626" : p.prob >= 0.38 ? "#059669" : "#0891B2",
+                      border: `1px solid ${p.prob >= 0.55 ? "#FECACA" : p.prob >= 0.38 ? "#A7F3D0" : "#E2E8F0"}`,
+                      borderRadius: 6,
+                      padding: "6px 10px",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      textAlign: "left",
+                      whiteSpace: "nowrap"
+                    }}
+                  >
+                    {action(p.prob)}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
