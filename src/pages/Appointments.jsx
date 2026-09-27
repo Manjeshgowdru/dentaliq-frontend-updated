@@ -34,7 +34,7 @@ export default function Appointments() {
     patient_name: "",
     patient_phone: "",
     treatment_type: "Vstupné vyšetrenie",
-    provider: "Dr. Patel",
+    provider: "Dr. Novak",
     fee: 150,
   });
 
@@ -77,7 +77,7 @@ export default function Appointments() {
   const handleActionClick = (patient) => {
     const rawPhone = patient.phone || "";
     const cleanDigits = rawPhone.replace(/[^0-9]/g, "");
-    const name = patient.name;
+    const name = patient.name || patient.patient || "Patient";
     const time = patient.time;
     const clinicName = "Gowdris Labs Dental Clinic";
 
@@ -104,12 +104,11 @@ export default function Appointments() {
 
   const handleCancelAppointment = async (patient) => {
     if (!patient.id) {
-      // Fallback for static mock items without a calendar ID
       setPatientList(prev => prev.filter(p => p !== patient));
       return;
     }
 
-    const confirmed = window.confirm(`Cancel appointment for ${patient.name} at ${patient.time}? This will delete it from Google Calendar.`);
+    const confirmed = window.confirm(`Cancel appointment for ${patient.name || patient.patient} at ${patient.time}? This will delete it from Google Calendar.`);
     if (!confirmed) return;
 
     try {
@@ -121,7 +120,6 @@ export default function Appointments() {
         throw new Error(`Server returned ${res.status}`);
       }
 
-      // Remove immediately from the UI view
       setPatientList(prev => prev.filter(p => p.id !== patient.id));
     } catch (err) {
       console.error("Deletion error:", err);
@@ -130,12 +128,15 @@ export default function Appointments() {
   };
 
   const handleBookAppointment = async (e) => {
-    e.preventDefault();
+    if (e && e.preventDefault) {
+      e.preventDefault();
+    }
+    
     setConflictData(null);
     setStatusMessage(null);
 
     // 1. Working hours validation (08:00 - 16:30 for 30-min slot)
-    const [hours, minutes] = formData.time.split(":").map(Number);
+    const [hours, minutes] = (formData.time || "10:00").split(":").map(Number);
     if (hours < 8 || hours >= 17 || (hours === 16 && minutes > 30)) {
       setStatusMessage({
         type: "error",
@@ -145,7 +146,7 @@ export default function Appointments() {
     }
 
     // 2. Patient name validation
-    if (formData.patient_name.trim().length < 2) {
+    if (!formData.patient_name || formData.patient_name.trim().length < 2) {
       setStatusMessage({
         type: "error",
         text: "Please enter a valid patient name."
@@ -154,7 +155,8 @@ export default function Appointments() {
     }
 
     // 3. International phone format validation (+421...)
-    const phoneClean = formData.patient_phone.trim().replace(/\s+/g, "");
+    const rawPhone = formData.patient_phone || "";
+    const phoneClean = rawPhone.trim().replace(/\s+/g, "");
     const phoneRegex = /^\+[0-9]{9,15}$/;
     if (!phoneRegex.test(phoneClean)) {
       setStatusMessage({
@@ -167,11 +169,16 @@ export default function Appointments() {
     setLoading(true);
 
     const payload = {
-      date: formData.date,
+      date: formData.date || selectedDate,
       time: formData.time,
       patient_name: formData.patient_name.trim(),
+      patient: formData.patient_name.trim(),
+      phone: phoneClean,
       patient_phone: phoneClean,
       treatment_type: formData.treatment_type,
+      procedure: formData.treatment_type,
+      provider: formData.provider || "Dr. Novak",
+      fee: Number(formData.fee) || 150
     };
 
     try {
@@ -181,22 +188,34 @@ export default function Appointments() {
         body: JSON.stringify(payload),
       });
 
-      if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`);
-      }
-
       const result = await response.json();
 
-      if (result.status === "booked") {
-        setStatusMessage({ type: "success", text: result.message || "Appointment booked successfully!" });
+      if (response.status === 409 || result.status === "conflict") {
+        setConflictData(result);
+        setStatusMessage({
+          type: "warning",
+          text: `Slot ${formData.time} is occupied. Please pick an alternative below.`
+        });
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(result.detail || `Server returned ${response.status}`);
+      }
+
+      // Backend returns status: "success" or "booked"
+      if (result.status === "success" || result.status === "booked") {
+        setStatusMessage({ type: "success", text: "Appointment booked successfully in Google Calendar!" });
         
         // Append dynamically if looking at current target date
-        if (formData.date === selectedDate) {
+        if (payload.date === selectedDate) {
           const newPatientEntry = {
             id: result.event_id,
             time: formData.time,
             name: formData.patient_name,
+            patient: formData.patient_name,
             proc: formData.treatment_type,
+            procedure: formData.treatment_type,
             prob: 0.15,
             status: "Upcoming",
             provider: formData.provider,
@@ -210,20 +229,13 @@ export default function Appointments() {
           setIsModalOpen(false);
           setStatusMessage(null);
           setFormData(prev => ({ ...prev, patient_name: "", patient_phone: "" }));
-        }, 1200);
-
-      } else if (result.status === "conflict") {
-        setConflictData(result);
-        setStatusMessage({
-          type: "warning",
-          text: `Slot ${result.requested_time} is occupied. Please pick an alternative below.`
-        });
+        }, 1000);
       }
     } catch (err) {
       console.error("Booking error:", err);
       setStatusMessage({ 
         type: "error", 
-        text: `Failed to connect to backend engine at ${API_BASE_URL}. Ensure Uvicorn is running.` 
+        text: err.message || `Failed to connect to backend engine at ${API_BASE_URL}. Ensure Uvicorn is running.` 
       });
     } finally {
       setLoading(false);
@@ -265,7 +277,12 @@ export default function Appointments() {
           />
           <button
             onClick={() => { 
-              setFormData(prev => ({ ...prev, date: selectedDate }));
+              setFormData(prev => ({ 
+                ...prev, 
+                date: selectedDate,
+                patient_name: "",
+                patient_phone: ""
+              }));
               setIsModalOpen(true); 
               setStatusMessage(null); 
               setConflictData(null); 
@@ -281,7 +298,7 @@ export default function Appointments() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 20 }}>
         {[
           ["Total Booked", patientList.length, "#4F5BD5"],
-          ["Critical Risk", patientList.filter(p => p.prob >= 0.55).length, "#DC2626"],
+          ["Critical Risk", patientList.filter(p => (p.prob || 0.15) >= 0.55).length, "#DC2626"],
           ["Expected Revenue", `€${patientList.reduce((s, p) => s + (Number(p.fee) || 0), 0).toLocaleString()}`, "#059669"],
           ["Completed", patientList.filter(p => p.status === "Completed").length, "#0891B2"],
         ].map(([label, val, col]) => (
@@ -314,22 +331,22 @@ export default function Appointments() {
                 <tr key={p.id || i} style={{ borderBottom: "1px solid #F1F5F9", background: i % 2 === 0 ? "#fff" : "#FAFBFF" }}>
                   <td style={{ padding: "13px 16px", fontFamily: "monospace", fontSize: 13, color: "#475569" }}>{p.time}</td>
                   <td style={{ padding: "13px 16px" }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "#0F172A" }}>{p.name}</div>
-                    <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>{p.status}</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#0F172A" }}>{p.name || p.patient}</div>
+                    <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>{p.status || "Confirmed"}</div>
                   </td>
-                  <td style={{ padding: "13px 16px", fontSize: 13, color: "#475569" }}>{p.proc}</td>
-                  <td style={{ padding: "13px 16px", fontSize: 13, color: "#475569" }}>{p.provider}</td>
+                  <td style={{ padding: "13px 16px", fontSize: 13, color: "#475569" }}>{p.proc || p.procedure}</td>
+                  <td style={{ padding: "13px 16px", fontSize: 13, color: "#475569" }}>{p.provider || "Dr. Novak"}</td>
                   <td style={{ padding: "13px 16px", fontSize: 13, fontWeight: 600, color: "#059669", fontFamily: "monospace" }}>€{p.fee}</td>
-                  <td style={{ padding: "13px 16px" }}><RiskBadge prob={p.prob} /></td>
+                  <td style={{ padding: "13px 16px" }}><RiskBadge prob={p.prob !== undefined ? p.prob : 0.15} /></td>
                   <td style={{ padding: "13px 16px" }}>
                     <div style={{ display: "flex", alignItems: "center" }}>
                       <button
                         type="button"
                         onClick={() => handleActionClick(p)}
                         style={{
-                          background: p.prob >= 0.55 ? "#FEF2F2" : p.prob >= 0.38 ? "#ECFDF5" : "#F8FAFC",
-                          color: p.prob >= 0.55 ? "#DC2626" : p.prob >= 0.38 ? "#059669" : "#0891B2",
-                          border: `1px solid ${p.prob >= 0.55 ? "#FECACA" : p.prob >= 0.38 ? "#A7F3D0" : "#E2E8F0"}`,
+                          background: (p.prob || 0.15) >= 0.55 ? "#FEF2F2" : (p.prob || 0.15) >= 0.38 ? "#ECFDF5" : "#F8FAFC",
+                          color: (p.prob || 0.15) >= 0.55 ? "#DC2626" : (p.prob || 0.15) >= 0.38 ? "#059669" : "#0891B2",
+                          border: `1px solid ${(p.prob || 0.15) >= 0.55 ? "#FECACA" : (p.prob || 0.15) >= 0.38 ? "#A7F3D0" : "#E2E8F0"}`,
                           borderRadius: 6,
                           padding: "6px 10px",
                           fontSize: 11,
@@ -339,7 +356,7 @@ export default function Appointments() {
                           whiteSpace: "nowrap"
                         }}
                       >
-                        {action(p.prob)}
+                        {action(p.prob !== undefined ? p.prob : 0.15)}
                       </button>
                       <button
                         type="button"
@@ -404,7 +421,7 @@ export default function Appointments() {
             {conflictData && conflictData.suggested_alternatives && conflictData.suggested_alternatives.length > 0 && (
               <div style={{ background: "#F8FAFC", border: "1px dashed #CBD5E1", borderRadius: 8, padding: 12, marginBottom: 16 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 8 }}>Available Open Slots:</div>
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {conflictData.suggested_alternatives.map(alt => (
                     <button
                       key={alt}
@@ -431,7 +448,7 @@ export default function Appointments() {
                   value={formData.date}
                   onChange={handleInputChange}
                   required
-                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13 }}
+                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13, boxSizing: "border-box" }}
                 />
               </div>
 
@@ -447,7 +464,7 @@ export default function Appointments() {
                     value={formData.time}
                     onChange={handleInputChange}
                     required
-                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13 }}
+                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13, boxSizing: "border-box" }}
                   />
                 </div>
                 <div>
@@ -458,7 +475,7 @@ export default function Appointments() {
                     value={formData.fee}
                     onChange={handleInputChange}
                     required
-                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13 }}
+                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13, boxSizing: "border-box" }}
                   />
                 </div>
               </div>
@@ -472,7 +489,7 @@ export default function Appointments() {
                   value={formData.patient_name}
                   onChange={handleInputChange}
                   required
-                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13 }}
+                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13, boxSizing: "border-box" }}
                 />
               </div>
 
@@ -485,7 +502,7 @@ export default function Appointments() {
                   value={formData.patient_phone}
                   onChange={handleInputChange}
                   required
-                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13 }}
+                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13, boxSizing: "border-box" }}
                 />
               </div>
 
@@ -497,7 +514,7 @@ export default function Appointments() {
                   value={formData.treatment_type}
                   onChange={handleInputChange}
                   required
-                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13 }}
+                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, border: "1px solid #CBD5E1", fontSize: 13, boxSizing: "border-box" }}
                 />
               </div>
 
@@ -510,7 +527,8 @@ export default function Appointments() {
                   Cancel
                 </button>
                 <button
-                  type="submit"
+                  type="button"
+                  onClick={handleBookAppointment}
                   disabled={loading}
                   style={{
                     padding: "8px 18px", background: "#4F5BD5", color: "#fff",
