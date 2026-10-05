@@ -1,4 +1,8 @@
 import { useState, useEffect } from "react";
+import { useSettings } from "../SettingsContext";
+import { normalizePhone, PHONE_HELP } from "../phone";
+import { api } from "../api";
+import VoiceAgent from "../voice/VoiceAgent";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
@@ -54,7 +58,22 @@ const SERVICES = [
 ];
 
 export default function PublicBooking() {
+  const { settings } = useSettings();
+  // Treatments marked "Online" in Settings → Treatments & pricing (falls back to the built-in list)
+  const services = settings
+    ? [
+        ...settings.treatments.filter((t) => t.online).map((t) => ({
+          id: t.code, name: t.name, localName: t.name_sk, duration: `${t.duration} min`,
+          tag: settings.booking?.show_prices ? `${t.category} · €${t.price}` : t.category, icon: t.icon,
+        })),
+        SERVICES.find((s) => s.id === "other"),
+      ]
+    : SERVICES;
+  const clinic = settings?.clinic || { name: "Smiles Dental Clinic", address: "Hlavná 42, 040 01 Košice" };
   const [selectedService, setSelectedService] = useState(SERVICES[0]);
+  useEffect(() => {
+    if (!services.some((s) => s.id === selectedService.id)) setSelectedService(services[0]);
+  }, [services, selectedService.id]);
   const [otherServiceText, setOtherServiceText] = useState("");
   const [selectedDate, setSelectedDate] = useState(() => {
     const d = new Date();
@@ -64,7 +83,13 @@ export default function PublicBooking() {
   const [availableSlots, setAvailableSlots] = useState([]);
   const [selectedSlot, setSelectedSlot] = useState("");
   const [patientName, setPatientName] = useState("");
-  const [patientPhone, setPatientPhone] = useState("+421");
+  const [patientPhone, setPatientPhone] = useState("");
+  const [voice, setVoice] = useState(null);
+  const [voiceOpen, setVoiceOpen] = useState(() => new URLSearchParams(window.location.search).get("call") === "1");
+  useEffect(() => {
+    api("/api/voice/status").then(setVoice).catch(() => setVoice(null));
+  }, []);
+  const voiceAvailable = voice?.configured && voice?.enabled;
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [successEvent, setSuccessEvent] = useState(null);
@@ -102,9 +127,9 @@ export default function PublicBooking() {
       return;
     }
 
-    const cleanPhone = patientPhone.trim().replace(/\s+/g, "");
-    if (!/^\+[0-9]{9,15}$/.test(cleanPhone)) {
-      setErrorMessage("Please provide a valid phone number with country code (e.g. +421905123456).");
+    const cleanPhone = normalizePhone(patientPhone);
+    if (!cleanPhone) {
+      setErrorMessage("Please enter a valid mobile number, e.g. 0905 123 456 or +421 905 123 456.");
       return;
     }
 
@@ -173,7 +198,7 @@ export default function PublicBooking() {
           <span style={{ fontSize: 11, fontWeight: 700, color: "#4F5BD5", letterSpacing: "1px", textTransform: "uppercase" }}>RESERVATION CONFIRMED</span>
           <h2 style={{ fontSize: 22, fontWeight: 800, color: "#0F172A", margin: "8px 0 10px" }}>We look forward to seeing you</h2>
           <p style={{ fontSize: 13, color: "#64748B", lineHeight: 1.5, margin: "0 0 24px" }}>
-            Your visit has been recorded in the clinic calendar. An SMS confirmation will be sent shortly.
+            Your visit has been recorded in the clinic calendar. Please arrive 5 minutes early; call the clinic if you need to change it.
           </p>
 
           <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 14, padding: "16px", textAlign: "left", marginBottom: 24, fontSize: 13 }}>
@@ -195,7 +220,7 @@ export default function PublicBooking() {
             onClick={() => {
               setSuccessEvent(null);
               setPatientName("");
-              setPatientPhone("+421");
+              setPatientPhone("");
               setOtherServiceText("");
             }}
             style={{ width: "100%", padding: "14px", background: "#4F5BD5", color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: "pointer" }}
@@ -248,14 +273,38 @@ export default function PublicBooking() {
               🦷
             </div>
             <div>
-              <div style={{ fontSize: 17, fontWeight: 800, color: "#0F172A" }}>Smiles Dental Clinic</div>
-              <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>Hlavná 42, Staré Mesto, Košice · ★ 4.9 (340+ reviews)</div>
+              <div style={{ fontSize: 17, fontWeight: 800, color: "#0F172A" }}>{clinic.name}</div>
+              <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{clinic.address}</div>
             </div>
           </div>
           <span style={{ background: "#ECFDF5", color: "#059669", padding: "5px 12px", borderRadius: 16, fontSize: 12, fontWeight: 600, border: "1px solid #A7F3D0" }}>
             ● Accepting New Patients
           </span>
         </div>
+
+        {voiceAvailable && !voiceOpen && (
+          <div onClick={() => setVoiceOpen(true)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", background: "linear-gradient(135deg,#0F172A,#312E81)", color: "#fff", borderRadius: 16, padding: "16px 20px", marginBottom: 20, cursor: "pointer" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <span style={{ fontSize: 28 }}>📞</span>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>Prefer to talk? Call our AI receptionist</div>
+                <div style={{ fontSize: 12, color: "#C7D2FE" }}>Hovorí po slovensky aj po anglicky · Book, check or cancel in under 2 minutes</div>
+              </div>
+            </div>
+            <span style={{ background: "#059669", borderRadius: 999, padding: "10px 18px", fontWeight: 700, fontSize: 13 }}>Start voice call</span>
+          </div>
+        )}
+        {voiceOpen && (
+          <div style={{ marginBottom: 20 }}>
+            {voiceAvailable ? (
+              <VoiceAgent onClose={() => setVoiceOpen(false)} />
+            ) : (
+              <div style={{ padding: "12px 16px", borderRadius: 10, background: "#FFFBEB", color: "#92400E", border: "1px solid #FDE68A", fontSize: 13 }}>
+                The AI receptionist is not available right now — please book below or call the clinic.
+              </div>
+            )}
+          </div>
+        )}
 
         {errorMessage && (
           <div style={{ padding: "12px 16px", borderRadius: 10, background: "#FEF2F2", color: "#991B1B", border: "1px solid #FECACA", fontSize: 13, marginBottom: 20 }}>
@@ -274,7 +323,7 @@ export default function PublicBooking() {
                 1. Select Treatment
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {SERVICES.map((s) => {
+                {services.map((s) => {
                   const isSelected = selectedService.id === s.id;
                   return (
                     <div
@@ -431,12 +480,15 @@ export default function PublicBooking() {
                 <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: "#64748B", marginBottom: 6 }}>PHONE NUMBER (WITH COUNTRY CODE)</label>
                 <input
                   type="tel"
-                  placeholder="+421905123456"
+                  placeholder="0905 123 456"
                   value={patientPhone}
                   onChange={(e) => setPatientPhone(e.target.value)}
                   required
                   style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid #CBD5E1", fontSize: 13, outline: "none", boxSizing: "border-box" }}
                 />
+                <div style={{ fontSize: 11, marginTop: 4, color: patientPhone && !normalizePhone(patientPhone) ? "#DC2626" : "#94A3B8" }}>
+                  {patientPhone ? (normalizePhone(patientPhone) ? `✓ We will use ${normalizePhone(patientPhone)}` : "Number looks incomplete") : PHONE_HELP}
+                </div>
               </div>
             </div>
 
@@ -494,7 +546,7 @@ export default function PublicBooking() {
               </div>
 
               <div style={{ textAlign: "center", marginTop: 12, fontSize: 11, color: "#94A3B8" }}>
-                🔒 Direct calendar booking · Free cancellation up to 24h prior
+                🔒 Direct calendar booking · To change or cancel, call the clinic or our AI receptionist
               </div>
             </div>
 

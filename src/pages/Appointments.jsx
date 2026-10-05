@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import RiskBadge from "../components/RiskBadge";
+import { normalizePhone } from "../phone";
+import { urlParam } from "../api";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
@@ -20,7 +22,12 @@ const action = prob =>
                  "✅ Monitor Only";
 
 export default function Appointments() {
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [selectedDate, setSelectedDate] = useState(() => {
+    const fromLink = urlParam("date");
+    if (fromLink && /^\d{4}-\d{2}-\d{2}$/.test(fromLink)) return fromLink;
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  });
   const [patientList, setPatientList] = useState(INITIAL_PATIENTS);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -156,12 +163,11 @@ export default function Appointments() {
 
     // 3. International phone format validation (+421...)
     const rawPhone = formData.patient_phone || "";
-    const phoneClean = rawPhone.trim().replace(/\s+/g, "");
-    const phoneRegex = /^\+[0-9]{9,15}$/;
-    if (!phoneRegex.test(phoneClean)) {
+    const phoneClean = normalizePhone(rawPhone);
+    if (!phoneClean) {
       setStatusMessage({
         type: "error",
-        text: "Please enter a valid international phone number starting with '+' (e.g. +421905123456)."
+        text: "Please enter a valid mobile number, e.g. 0905 123 456 or +421 905 123 456."
       });
       return;
     }
@@ -498,7 +504,7 @@ export default function Appointments() {
                 <input
                   type="tel"
                   name="patient_phone"
-                  placeholder="+421905123456"
+                  placeholder="0905 123 456"
                   value={formData.patient_phone}
                   onChange={handleInputChange}
                   required
